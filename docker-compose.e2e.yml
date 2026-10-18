@@ -1,0 +1,45 @@
+# Infrastructure for the E2E environment. The backend and web app run from an
+# app checkout (see scripts/e2e-env.sh) so tests always exercise the code under
+# review rather than a published image.
+#
+# Ports bind to 127.0.0.1 only and avoid the defaults (5432) so a developer's
+# own Postgres keeps working alongside.
+name: beauty-e2e
+
+services:
+  db:
+    # Same major version as production (docker-compose.yml in the app repo).
+    # Real Postgres, not the backend's H2 fallback: jsonb, unique-violation
+    # SQLSTATE handling and the production dialect are part of what is tested.
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: beautydb
+      POSTGRES_USER: beauty
+      # Throwaway, localhost-only test database; override if you need to.
+      POSTGRES_PASSWORD: ${E2E_DB_PASSWORD:-e2e-local-only}
+    ports:
+      - "127.0.0.1:${E2E_DB_PORT:-55432}:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U beauty -d beautydb"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  mail:
+    # Catches every message the backend sends (plain SMTP, no TLS) and exposes
+    # them over an HTTP API, so verification links are read deterministically
+    # instead of scraped from logs. Nothing leaves the machine.
+    image: axllent/mailpit:v1.31.3
+    ports:
+      - "127.0.0.1:${E2E_SMTP_PORT:-1025}:1025"
+      - "127.0.0.1:${E2E_MAILPIT_PORT:-8025}:8025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  db_data:
