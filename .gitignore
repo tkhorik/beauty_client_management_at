@@ -1,0 +1,11 @@
+# Gradle / IDE
+.gradle/
+build/
+.kotlin/
+.idea/
+*.iml
+.DS_Store
+
+# Local E2E environment state: generated credentials, PIDs and service logs.
+# Never commit — it holds the bootstrapped super-admin password.
+.e2e/
