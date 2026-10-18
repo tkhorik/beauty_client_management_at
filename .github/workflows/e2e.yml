@@ -1,0 +1,117 @@
+# UI E2E and real-HTTP API tests against a freshly built app checkout.
+#
+# Pull requests and pushes run the smoke subset; the nightly run executes
+# everything. A manual run can target any app ref (e.g. an open app PR's branch)
+# and any tag set.
+
+name: E2E
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      app_ref:
+        description: 'beauty_client_management ref to test (branch, tag or SHA)'
+        default: 'main'
+      tags:
+        description: 'JUnit tags to include, comma-separated (empty = all)'
+        default: ''
+
+concurrency:
+  group: e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: E2E (Chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      E2E_APP_DIR: ${{ github.workspace }}/app
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out the app
+        uses: actions/checkout@v4
+        with:
+          repository: tkhorik/beauty_client_management
+          # Manual input first, then the optional repository variable E2E_APP_REF
+          # (lets PR runs target an app branch that is not merged yet), then main.
+          ref: ${{ inputs.app_ref || vars.E2E_APP_REF || 'main' }}
+          path: app
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+          cache-dependency-path: |
+            *.gradle.kts
+            gradle/wrapper/gradle-wrapper.properties
+            app/backend/*.gradle.kts
+            app/backend/gradle/wrapper/gradle-wrapper.properties
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: npm
+          cache-dependency-path: app/web/package-lock.json
+
+      # Keyed on the build file, which pins the Playwright version and with it
+      # the browser builds.
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('build.gradle.kts') }}
+
+      - name: Install Chromium and its OS dependencies
+        run: ./gradlew --no-daemon installBrowsers -PwithDeps
+
+      - name: Start environment (Postgres, Mailpit, backend, web, super admin)
+        run: |
+          (cd app/web && npm ci --no-audit --no-fund)
+          scripts/e2e-env.sh up
+
+      - name: Choose test tags
+        id: tags
+        env:
+          EVENT: ${{ github.event_name }}
+          REQUESTED: ${{ inputs.tags }}
+        run: |
+          case "$EVENT" in
+            workflow_dispatch) echo "include=$REQUESTED" >> "$GITHUB_OUTPUT" ;;
+            schedule)          echo "include=" >> "$GITHUB_OUTPUT" ;;
+            *)                 echo "include=smoke" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      # No retry wrapper: a flaky E2E test is a bug to fix, not to mask.
+      - name: Run tests
+        run: ./gradlew --no-daemon test "-PincludeTags=${{ steps.tags.outputs.include }}"
+
+      # Artifacts can contain request bodies from throwaway test accounts;
+      # .e2e/e2e.env (the super-admin password) is deliberately not uploaded.
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/e2e-artifacts/
+            build/reports/tests/
+            build/test-results/
+            .e2e/logs/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Stop environment
+        if: always()
+        run: scripts/e2e-env.sh down -v
